@@ -1,0 +1,219 @@
+require('dotenv').config();
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+const cors = require('cors');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// MongoDB
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cruduser.c6e8c0q.mongodb.net/?appName=Cruduser`;
+const client = new MongoClient(uri, {
+  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
+});
+
+async function run() {
+  try {
+    await client.connect();
+
+    const db = client.db('homedb');
+    const serviceCollection = db.collection('services');
+    const homeCollection = db.collection('homeservice');
+    const bookingCollection = db.collection('bookings');
+    const paymentCollection = db.collection('payments');
+    const userCollection = db.collection('users');
+
+    /* ===================== USERS ===================== */
+    app.post('/users', async (req, res) => {
+      const user = req.body;
+      const existing = await userCollection.findOne({ email: user.email });
+      if (existing) return res.send({ message: 'User already exists' });
+
+      const newUser = {
+        name: user.name,
+        email: user.email,
+        photoURL: user.photoURL,
+        role: 'user',
+        createdAt: new Date(),
+      };
+
+      const result = await userCollection.insertOne(newUser);
+      res.send(result);
+    });
+
+    app.get('/users', async (req, res) => {
+      const result = await userCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/users/:email/role', async (req, res) => {
+      const user = await userCollection.findOne({ email: req.params.email });
+      res.send({ role: user?.role || 'user' });
+    });
+
+    app.patch('/users/admin/:id', async (req, res) => {
+      const result = await userCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { role: 'admin' } }
+      );
+      res.send(result);
+    });
+
+    /* ===================== BOOKINGS ===================== */
+    app.post('/bookings', async (req, res) => {
+      const booking = { ...req.body, status: 'pending', createdAt: new Date() };
+      const result = await bookingCollection.insertOne(booking);
+      res.send(result);
+    });
+
+    app.get('/bookings', async (req, res) => {
+      const email = req.query.email;
+      const query = email ? { email } : {};
+      const result = await bookingCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    app.get('/booking/:id', async (req, res) => {
+      const result = await bookingCollection.findOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    app.delete('/bookings/:id', async (req, res) => {
+      const result = await bookingCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    /* ========= ✅ UPDATE BOOKING (DATE + LOCATION) ========= */
+    app.patch('/bookings/:id', async (req, res) => {
+      const { bookingDate, location } = req.body;
+      const id = req.params.id;
+
+      if (!bookingDate || !location) {
+        return res.status(400).send({ message: 'Booking date and location are required' });
+      }
+
+      const booking = await bookingCollection.findOne({ _id: new ObjectId(id) });
+
+      if (!booking) {
+        return res.status(404).send({ message: 'Booking not found' });
+      }
+
+      if (booking.status === 'Paid') {
+        return res.status(403).send({ message: 'Paid booking cannot be updated' });
+      }
+
+      const result = await bookingCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            bookingDate,
+            location,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      res.send(result);
+    });
+
+    /* ===================== ADMIN BOOKINGS ===================== */
+    app.get('/admin/bookings', async (req, res) => {
+      const result = await bookingCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.patch('/admin/bookings/:id', async (req, res) => {
+      const result = await bookingCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { status: req.body.status } }
+      );
+      res.send(result);
+    });
+
+    /* ===================== STRIPE PAYMENT ===================== */
+    app.post('/create-checkout-session', async (req, res) => {
+      const { bookingId, bookingEmail, bookingName, cost } = req.body;
+      const amount = parseInt(cost) * 100;
+
+      try {
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ['card'],
+          line_items: [
+            {
+              price_data: {
+                currency: 'USD',
+                unit_amount: amount,
+                product_data: { name: bookingName },
+              },
+              quantity: 1,
+            },
+          ],
+          mode: 'payment',
+          customer_email: bookingEmail,
+          metadata: { bookingId, bookingName },
+          success_url: `${process.env.SITE_DOMIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMIN}/dashboard/payment-cancel`,
+        });
+
+        res.send({ url: session.url });
+      } catch (error) {
+        res.status(500).send({ message: 'Stripe session creation failed' });
+      }
+    });
+
+    app.get('/payments', async (req, res) => {
+      const email = req.query.email;
+      const payments = await paymentCollection.find({ userEmail: email }).toArray();
+      res.send(payments);
+    });
+
+    /* ===================== SERVICES ===================== */
+    app.get('/admin/services', async (req, res) => {
+      const services = await serviceCollection.find().toArray();
+      res.send(services);
+    });
+
+    app.post('/admin/services', async (req, res) => {
+      const service = { ...req.body, createdAt: new Date() };
+      const result = await serviceCollection.insertOne(service);
+      res.send(result);
+    });
+
+    app.patch('/admin/services/:id', async (req, res) => {
+      const result = await serviceCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: req.body }
+      );
+      res.send(result);
+    });
+
+    app.delete('/admin/services/:id', async (req, res) => {
+      const result = await serviceCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    /* ===================== HOME SERVICE ===================== */
+    app.get('/homeservice', async (req, res) => {
+      const result = await homeCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get('/homeservice/:id', async (req, res) => {
+      const result = await homeCollection.findOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    console.log('MongoDB connected successfully!');
+  } finally {
+    // client.close()
+  }
+}
+
+run().catch(console.dir);
+
+app.get('/', (req, res) => res.send('Server is running'));
+app.listen(port, () => console.log(`Server running on port ${port}`));
