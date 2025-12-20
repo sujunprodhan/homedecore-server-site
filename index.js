@@ -140,8 +140,23 @@ async function run() {
 
     /* ===================== ADMIN BOOKINGS ===================== */
     app.get('/admin/bookings', async (req, res) => {
-      const result = await bookingCollection.find().toArray();
-      res.send(result);
+      try {
+        const bookings = await bookingCollection.find().toArray();
+        const bookingsWithUser = await Promise.all(
+          bookings.map(async (b) => {
+            const user = await userCollection.findOne({ email: b.email });
+            return {
+              ...b,
+              userName: user?.name || '', 
+              userEmail: user?.email || b.email,
+            };
+          })
+        );
+
+        res.send(bookingsWithUser);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch bookings' });
+      }
     });
 
     app.patch('/admin/bookings/:id', async (req, res) => {
