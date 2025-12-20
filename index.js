@@ -10,6 +10,10 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 app.use(cors());
 app.use(express.json());
 
+function generateTrackingId() {
+  return 'TRK-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+}
+
 // MongoDB
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cruduser.c6e8c0q.mongodb.net/?appName=Cruduser`;
 const client = new MongoClient(uri, {
@@ -55,12 +59,26 @@ async function run() {
       res.send({ role: user?.role || 'user' });
     });
 
+    // Make admin
     app.patch('/users/admin/:id', async (req, res) => {
       const result = await userCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
         { $set: { role: 'admin' } }
       );
       res.send(result);
+    });
+
+    // Convert admin back to user
+    app.patch('/users/user/:id', async (req, res) => {
+      try {
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { role: 'user' } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to convert admin to user' });
+      }
     });
 
     /* ===================== BOOKINGS ===================== */
@@ -87,7 +105,7 @@ async function run() {
       res.send(result);
     });
 
-    /* ========= ✅ UPDATE BOOKING (DATE + LOCATION) ========= */
+    // Update booking (date + location)
     app.patch('/bookings/:id', async (req, res) => {
       const { bookingDate, location } = req.body;
       const id = req.params.id;
@@ -134,6 +152,15 @@ async function run() {
       res.send(result);
     });
 
+    app.patch('/admin/bookings/paid/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await bookingCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: 'Paid', paidAt: new Date() } }
+      );
+      res.send(result);
+    });
+
     /* ===================== STRIPE PAYMENT ===================== */
     app.post('/create-checkout-session', async (req, res) => {
       const { bookingId, bookingEmail, bookingName, cost } = req.body;
@@ -165,10 +192,57 @@ async function run() {
       }
     });
 
+    app.patch('/payments-success', async (req, res) => {
+      try {
+        const sessionId = req.query.session_id;
+        if (!sessionId) return res.status(400).send({ message: 'Session ID is required' });
+
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        if (session.payment_status !== 'paid') {
+          return res.status(400).send({ success: false, message: 'Payment not completed' });
+        }
+
+        const transactionId = session.payment_intent;
+        const trackingId = generateTrackingId();
+
+        // Update booking status
+        await bookingCollection.updateOne(
+          { _id: new ObjectId(session.metadata.bookingId) },
+          { $set: { status: 'Paid', trackingId } }
+        );
+
+        // Record payment
+        const payment = {
+          price: session.amount_total / 100,
+          currency: session.currency,
+          customerEmail: session.customer_email,
+          bookingId: session.metadata.bookingId,
+          serviceName: session.metadata.bookingName,
+          transactionId,
+          paymentStatus: session.payment_status,
+          trackingId,
+          paidAt: new Date(),
+        };
+
+        await paymentCollection.updateOne(
+          { transactionId },
+          { $setOnInsert: payment },
+          { upsert: true }
+        );
+
+        res.send({ success: true, transactionId, trackingId });
+      } catch (error) {
+        res.status(500).send({ success: false, message: 'Payment processing failed' });
+      }
+    });
+
     app.get('/payments', async (req, res) => {
       const email = req.query.email;
-      const payments = await paymentCollection.find({ userEmail: email }).toArray();
-      res.send(payments);
+      const query = email ? { customerEmail: email } : {};
+      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
+      const result = await cursor.toArray();
+      res.send(result);
     });
 
     /* ===================== SERVICES ===================== */
@@ -204,6 +278,50 @@ async function run() {
 
     app.get('/homeservice/:id', async (req, res) => {
       const result = await homeCollection.findOne({ _id: new ObjectId(req.params.id) });
+      res.send(result);
+    });
+
+    /* ===================== DECORATORS ===================== */
+    // Get all decorators
+    app.get('/admin/decorators', async (req, res) => {
+      const decorators = await userCollection.find({ role: 'decorator' }).toArray();
+      res.send(decorators);
+    });
+
+    // Add new decorator
+    app.post('/admin/decorators', async (req, res) => {
+      const { name, email } = req.body;
+      const existing = await userCollection.findOne({ email });
+      if (existing) return res.status(400).send({ message: 'User already exists' });
+
+      const newDecorator = {
+        name,
+        email,
+        role: 'decorator',
+        status: 'active',
+        createdAt: new Date(),
+      };
+
+      const result = await userCollection.insertOne(newDecorator);
+      res.send(result);
+    });
+
+    // Update decorator status
+    app.patch('/admin/decorators/:id', async (req, res) => {
+      const { status } = req.body;
+      const result = await userCollection.updateOne(
+        { _id: new ObjectId(req.params.id), role: 'decorator' },
+        { $set: { status } }
+      );
+      res.send(result);
+    });
+
+    // Delete decorator
+    app.delete('/admin/decorators/:id', async (req, res) => {
+      const result = await userCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+        role: 'decorator',
+      });
       res.send(result);
     });
 
