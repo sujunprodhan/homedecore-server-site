@@ -231,7 +231,14 @@ async function run() {
           { upsert: true }
         );
 
-        res.send({ success: true, transactionId, trackingId });
+        res.send({
+          success: true,
+          transactionId,
+          trackingId,
+          price: payment.price,
+          date: payment.paidAt,
+          services: payment.serviceName,
+        });
       } catch (error) {
         res.status(500).send({ success: false, message: 'Payment processing failed' });
       }
