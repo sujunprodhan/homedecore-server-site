@@ -30,7 +30,7 @@ async function run() {
     const bookingCollection = db.collection('bookings');
     const paymentCollection = db.collection('payments');
     const userCollection = db.collection('users');
-    const reviewCollection = db.collection('reviews'); // <-- Reviews collection
+    const reviewCollection = db.collection('reviews');
 
     /* ===================== USERS ===================== */
     app.post('/users', async (req, res) => {
