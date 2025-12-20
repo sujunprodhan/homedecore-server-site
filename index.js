@@ -30,6 +30,7 @@ async function run() {
     const bookingCollection = db.collection('bookings');
     const paymentCollection = db.collection('payments');
     const userCollection = db.collection('users');
+    const reviewCollection = db.collection('reviews'); // <-- Reviews collection
 
     /* ===================== USERS ===================== */
     app.post('/users', async (req, res) => {
@@ -59,7 +60,6 @@ async function run() {
       res.send({ role: user?.role || 'user' });
     });
 
-    // Make admin
     app.patch('/users/admin/:id', async (req, res) => {
       const result = await userCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
@@ -68,7 +68,6 @@ async function run() {
       res.send(result);
     });
 
-    // Convert admin back to user
     app.patch('/users/user/:id', async (req, res) => {
       try {
         const result = await userCollection.updateOne(
@@ -105,36 +104,20 @@ async function run() {
       res.send(result);
     });
 
-    // Update booking (date + location)
     app.patch('/bookings/:id', async (req, res) => {
-      const { bookingDate, location } = req.body;
+      const { bookingDate, location, assignedDecorator } = req.body;
       const id = req.params.id;
 
-      if (!bookingDate || !location) {
-        return res.status(400).send({ message: 'Booking date and location are required' });
-      }
-
-      const booking = await bookingCollection.findOne({ _id: new ObjectId(id) });
-
-      if (!booking) {
-        return res.status(404).send({ message: 'Booking not found' });
-      }
-
-      if (booking.status === 'Paid') {
-        return res.status(403).send({ message: 'Paid booking cannot be updated' });
-      }
+      const updateFields = {};
+      if (bookingDate) updateFields.bookingDate = bookingDate;
+      if (location) updateFields.location = location;
+      if (assignedDecorator) updateFields.assignedDecorator = assignedDecorator;
+      updateFields.updatedAt = new Date();
 
       const result = await bookingCollection.updateOne(
         { _id: new ObjectId(id) },
-        {
-          $set: {
-            bookingDate,
-            location,
-            updatedAt: new Date(),
-          },
-        }
+        { $set: updateFields }
       );
-
       res.send(result);
     });
 
@@ -142,27 +125,37 @@ async function run() {
     app.get('/admin/bookings', async (req, res) => {
       try {
         const bookings = await bookingCollection.find().toArray();
-        const bookingsWithUser = await Promise.all(
+        const bookingsWithUserAndDecorator = await Promise.all(
           bookings.map(async (b) => {
             const user = await userCollection.findOne({ email: b.email });
+            let decoratorName = '';
+            if (b.assignedDecorator) {
+              const decorator = await userCollection.findOne({ email: b.assignedDecorator });
+              decoratorName = decorator?.name || '';
+            }
             return {
               ...b,
-              userName: user?.name || '', 
+              userName: user?.name || '',
               userEmail: user?.email || b.email,
+              decoratorName,
             };
           })
         );
-
-        res.send(bookingsWithUser);
+        res.send(bookingsWithUserAndDecorator);
       } catch (err) {
         res.status(500).send({ message: 'Failed to fetch bookings' });
       }
     });
 
     app.patch('/admin/bookings/:id', async (req, res) => {
+      const { status, assignedDecorator } = req.body;
+      const updateFields = {};
+      if (status) updateFields.status = status;
+      if (assignedDecorator) updateFields.assignedDecorator = assignedDecorator;
+
       const result = await bookingCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
-        { $set: { status: req.body.status } }
+        { $set: updateFields }
       );
       res.send(result);
     });
@@ -213,7 +206,6 @@ async function run() {
         if (!sessionId) return res.status(400).send({ message: 'Session ID is required' });
 
         const session = await stripe.checkout.sessions.retrieve(sessionId);
-
         if (session.payment_status !== 'paid') {
           return res.status(400).send({ success: false, message: 'Payment not completed' });
         }
@@ -221,13 +213,11 @@ async function run() {
         const transactionId = session.payment_intent;
         const trackingId = generateTrackingId();
 
-        // Update booking status
         await bookingCollection.updateOne(
           { _id: new ObjectId(session.metadata.bookingId) },
           { $set: { status: 'Paid', trackingId } }
         );
 
-        // Record payment
         const payment = {
           price: session.amount_total / 100,
           currency: session.currency,
@@ -304,13 +294,11 @@ async function run() {
     });
 
     /* ===================== DECORATORS ===================== */
-    // Get all decorators
     app.get('/admin/decorators', async (req, res) => {
       const decorators = await userCollection.find({ role: 'decorator' }).toArray();
       res.send(decorators);
     });
 
-    // Add new decorator
     app.post('/admin/decorators', async (req, res) => {
       const { name, email } = req.body;
       const existing = await userCollection.findOne({ email });
@@ -328,7 +316,6 @@ async function run() {
       res.send(result);
     });
 
-    // Update decorator status
     app.patch('/admin/decorators/:id', async (req, res) => {
       const { status } = req.body;
       const result = await userCollection.updateOne(
@@ -338,12 +325,56 @@ async function run() {
       res.send(result);
     });
 
-    // Delete decorator
     app.delete('/admin/decorators/:id', async (req, res) => {
       const result = await userCollection.deleteOne({
         _id: new ObjectId(req.params.id),
         role: 'decorator',
       });
+      res.send(result);
+    });
+
+    /* ===================== REVIEWS ===================== */
+    // Add review
+    app.post('/reviews', async (req, res) => {
+      const { serviceId, userEmail, userName, rating, comment } = req.body;
+
+      if (!serviceId || !userEmail || !rating) {
+        return res.status(400).send({ message: 'Service, user and rating are required' });
+      }
+
+      const newReview = {
+        serviceId: new ObjectId(serviceId),
+        userEmail,
+        userName,
+        rating,
+        comment: comment || '',
+        createdAt: new Date(),
+      };
+
+      const result = await reviewCollection.insertOne(newReview);
+      res.send(result);
+    });
+
+    // Get all reviews
+    app.get('/reviews', async (req, res) => {
+      const reviews = await reviewCollection.find().sort({ createdAt: -1 }).toArray();
+      res.send(reviews);
+    });
+
+    // Get reviews for a specific service
+    app.get('/reviews/service/:serviceId', async (req, res) => {
+      const serviceId = req.params.serviceId;
+      const reviews = await reviewCollection
+        .find({ serviceId: new ObjectId(serviceId) })
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(reviews);
+    });
+
+    // Delete a review
+    app.delete('/reviews/:id', async (req, res) => {
+      const id = req.params.id;
+      const result = await reviewCollection.deleteOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
